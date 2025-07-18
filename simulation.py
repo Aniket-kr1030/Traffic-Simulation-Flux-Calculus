@@ -2,6 +2,9 @@ import math
 import random
 from dataclasses import dataclass
 from typing import Dict, Tuple, List, Optional
+from copy import deepcopy
+
+from plotly.subplots import make_subplots
 
 import plotly.graph_objects as go
 
@@ -82,21 +85,43 @@ class TrafficSimulation:
 
 
     def run_visual(self, hours: int = SIMULATION_HOURS):
-        """Run the simulation and show an interactive Plotly animation."""
+        """Run the simulation and generate an interactive Plotly animation with
+        time-series charts and color legend."""
         ticks = int((60 / TICK_MINUTES) * hours)
         self.time = 0
 
-        frames: List[go.Frame] = []
+        history: Dict[str, List[float]] = {name: [] for name in self.fluxons}
+        states: List[Dict[str, Fluxon]] = []
+        anchor_events: List[Tuple[int, str, str]] = []
+        max_v = 0.0
+
         for _ in range(ticks):
-            self.step()
+            triggered = self.step()
+            if triggered:
+                anchor_events.extend([(self.time, n, a.id) for n, a in triggered])
+
+            snapshot = {name: deepcopy(f) for name, f in self.fluxons.items()}
+            states.append(snapshot)
+
+            for name, f in self.fluxons.items():
+                history[name].append(f.v)
+                max_v = max(max_v, f.v)
+
             self.time += 1
 
+        if not states:
+            return
+
+        time_axis = list(range(1, ticks + 1))
+
+        frames: List[go.Frame] = []
+        for t_idx, state in enumerate(states, start=1):
             node_x, node_y, node_text = [], [], []
-            for name, f in self.fluxons.items():
+            for name, f in state.items():
                 x, y = self.coords.get(name, (0, 0))
                 node_x.append(x)
                 node_y.append(y)
-                anchor_active = f.anchor_until > self.time
+                anchor_active = f.anchor_until > t_idx
                 info = f"{name}<br>v={int(f.v)} u={f.u:.1f} W={f.W:.1f}"
                 if anchor_active:
                     info += "<br>(anchor)"
@@ -106,8 +131,8 @@ class TrafficSimulation:
             for start, end in self.routes:
                 x0, y0 = self.coords[start]
                 x1, y1 = self.coords[end]
-                f_start = self.fluxons[start]
-                f_end = self.fluxons[end]
+                f_start = state[start]
+                f_end = state[end]
                 load = (f_start.v + f_end.v) / 2
                 width = max(1, load / 150)
                 d = self.drift(f_start, f_end)
@@ -127,12 +152,13 @@ class TrafficSimulation:
                         line=dict(width=width, color=color),
                         hovertext=f"drift {d:.2f}",
                         hoverinfo="text",
+                        showlegend=False,
                     )
                 )
 
             node_colors = [
-                "orange" if self.fluxons[name].anchor_until > self.time else "blue"
-                for name in self.fluxons
+                "orange" if state[name].anchor_until > t_idx else "blue"
+                for name in state
             ]
             node_trace = go.Scatter(
                 x=node_x,
@@ -141,19 +167,75 @@ class TrafficSimulation:
                 text=node_text,
                 textposition="top center",
                 marker=dict(size=12, color=node_colors),
+                showlegend=False,
             )
 
-            frames.append(go.Frame(data=[node_trace] + edge_traces, name=str(self.time)))
+            vert_line = go.Scatter(
+                x=[t_idx, t_idx],
+                y=[0, max_v],
+                mode="lines",
+                line=dict(color="black", dash="dot"),
+                showlegend=False,
+                xaxis="x2",
+                yaxis="y2",
+            )
 
-        if not frames:
-            return
+            frames.append(go.Frame(data=[node_trace] + edge_traces + [vert_line], name=str(t_idx)))
 
-        fig = go.Figure(data=frames[0].data, frames=frames)
+        # build static traces for time series
+        line_traces: List[go.Scatter] = []
+        for name, series in history.items():
+            line_traces.append(
+                go.Scatter(
+                    x=time_axis,
+                    y=series,
+                    mode="lines",
+                    name=name,
+                    xaxis="x2",
+                    yaxis="y2",
+                )
+            )
+
+        for t, name, aid in anchor_events:
+            line_traces.append(
+                go.Scatter(
+                    x=[t + 1],
+                    y=[history[name][t]],
+                    mode="markers",
+                    marker=dict(color="purple", size=8, symbol="diamond"),
+                    name=f"⚑ {aid} @ {name}",
+                    xaxis="x2",
+                    yaxis="y2",
+                )
+            )
+
+        legend_traces = [
+            go.Scatter(x=[None], y=[None], mode="lines", line=dict(color="blue"), name="stable drift"),
+            go.Scatter(x=[None], y=[None], mode="lines", line=dict(color="green"), name="plausible drift"),
+            go.Scatter(x=[None], y=[None], mode="lines", line=dict(color="orange"), name="possible drift"),
+            go.Scatter(x=[None], y=[None], mode="lines", line=dict(color="red"), name="void drift"),
+        ]
+
+        fig = make_subplots(rows=2, cols=1, row_heights=[0.6, 0.4], vertical_spacing=0.08)
+
+        for tr in frames[0].data:
+            fig.add_trace(tr, row=1, col=1)
+
+        for tr in line_traces:
+            fig.add_trace(tr, row=2, col=1)
+
+        for tr in legend_traces:
+            fig.add_trace(tr, row=1, col=1)
+
+        fig.frames = frames
+
         fig.update_layout(
             xaxis=dict(range=[-1.5, 1.5], visible=False),
             yaxis=dict(range=[-1.5, 1.5], visible=False),
+            xaxis2=dict(title="Time (min)", range=[0, ticks + 1]),
+            yaxis2=dict(title="Vehicle count", range=[0, max_v * 1.1]),
             title="Bangalore Traffic Simulation",
-            showlegend=False,
+            showlegend=True,
             updatemenus=[
                 {
                     "type": "buttons",
@@ -178,10 +260,13 @@ class TrafficSimulation:
         # sort by Lamport timestamp (when) and precedence
         self.anchors.sort(key=lambda x: (x[0], x[2].precedence))
 
-    def step(self):
+    def step(self) -> List[Tuple[str, Anchor]]:
+        """Advance simulation by one tick and return triggered anchors."""
+        triggered: List[Tuple[str, Anchor]] = []
         # process anchors
         while self.anchors and self.anchors[0][0] == self.time:
             _, name, anchor = self.anchors.pop(0)
+            triggered.append((name, anchor))
             f = self.fluxons[name]
             f.u += anchor.delta_u
             f.anchor_until = self.time + anchor.delta_tau
@@ -201,6 +286,8 @@ class TrafficSimulation:
             if f.anchor_until <= self.time:
                 f.anchor_until = 0
             f.update_velocity(prev_v)
+
+        return triggered
 
     def proximity(self, a: Fluxon, b: Fluxon, eps: float) -> bool:
         return abs(a.v - b.v) <= eps * max(a.s, b.s, PROX_EPSILON0)

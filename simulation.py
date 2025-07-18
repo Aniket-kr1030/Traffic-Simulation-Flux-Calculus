@@ -82,6 +82,8 @@ class TrafficSimulation:
         self.coords = coords
         self.routes = routes
         self.anchors: List[Tuple[int, str, Anchor]] = []  # queue of (time, name, anchor)
+        # cooldown tracker so mitigation anchors are not reissued every tick
+        self.last_decision_tick: Dict[str, int] = {name: -1000 for name in intersections}
 
 
     def run_visual(self, hours: int = SIMULATION_HOURS):
@@ -260,8 +262,29 @@ class TrafficSimulation:
         # sort by Lamport timestamp (when) and precedence
         self.anchors.sort(key=lambda x: (x[0], x[2].precedence))
 
+    def manage_traffic(self):
+        """Issue mitigation anchors based on congestion and drift."""
+        for name, f in self.fluxons.items():
+            cp = CHOKE_POINTS.get(name)
+            if cp and f.v > cp["capacity"] * 1.2 and self.time - self.last_decision_tick[name] > 10:
+                # extend green signal to relieve congestion
+                anc = Anchor(id="extend_green", delta_u=5, delta_tau=0, precedence=2)
+                self.schedule_anchor(self.time, name, anc)
+                self.last_decision_tick[name] = self.time
+
+        for start, end in self.routes:
+            d = self.drift(self.fluxons[start], self.fluxons[end])
+            if d < 0.05 and self.time - self.last_decision_tick[start] > 10:
+                # divert traffic away from unstable link
+                anc = Anchor(id="divert", delta_u=-5, delta_tau=0, precedence=2)
+                self.schedule_anchor(self.time, start, anc)
+                self.last_decision_tick[start] = self.time
+
     def step(self) -> List[Tuple[str, Anchor]]:
         """Advance simulation by one tick and return triggered anchors."""
+        # issue any mitigation anchors based on current state
+        self.manage_traffic()
+
         triggered: List[Tuple[str, Anchor]] = []
         # process anchors
         while self.anchors and self.anchors[0][0] == self.time:

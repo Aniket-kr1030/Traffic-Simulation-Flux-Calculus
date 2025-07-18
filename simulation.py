@@ -3,8 +3,7 @@ import random
 from dataclasses import dataclass
 from typing import Dict, Tuple, List, Optional
 
-import plotly.express as px
-import pandas as pd
+import plotly.graph_objects as go
 
 # Constants from Flux Calculus v1.1
 WINDOW_MIN = 5
@@ -33,6 +32,14 @@ CHOKE_POINTS = {
     "Hebbal": {"capacity": 400, "factor": 0.3},
     "Electronic_City": {"capacity": 320, "factor": 0.4},
 }
+
+# Simple routes connecting major intersections
+ROUTES = [
+    ("Hebbal", "KR_Puram"),
+    ("KR_Puram", "Silk_Board"),
+    ("Silk_Board", "Electronic_City"),
+    ("Electronic_City", "Hebbal"),
+]
 
 @dataclass
 class Fluxon:
@@ -64,12 +71,13 @@ class Anchor:
     precedence: int
 
 class TrafficSimulation:
-    def __init__(self, intersections: List[str], coords: Dict[str, Tuple[float, float]]):
+    def __init__(self, intersections: List[str], coords: Dict[str, Tuple[float, float]], routes: List[Tuple[str, str]] = ROUTES):
         self.time = 0
         self.fluxons: Dict[str, Fluxon] = {
             name: Fluxon(v=random.randint(200, 500)) for name in intersections
         }
         self.coords = coords
+        self.routes = routes
         self.anchors: List[Tuple[int, str, Anchor]] = []  # queue of (time, name, anchor)
 
 
@@ -77,42 +85,71 @@ class TrafficSimulation:
         """Run the simulation and show an interactive Plotly animation."""
         ticks = int((60 / TICK_MINUTES) * hours)
         self.time = 0
-        frames: List[Dict[str, float]] = []
+
+        frames: List[go.Frame] = []
         for _ in range(ticks):
             self.step()
             self.time += 1
+
+            node_x, node_y, node_text = [], [], []
             for name, f in self.fluxons.items():
                 x, y = self.coords.get(name, (0, 0))
-                frames.append({
-                    "time": self.time,
-                    "x": x,
-                    "y": y,
-                    "intersection": name,
-                    "volume": f.v,
-                })
-        df = pd.DataFrame(frames)
-        fig = px.scatter(
-            df,
-            x="x",
-            y="y",
-            animation_frame="time",
-            animation_group="intersection",
-            size="volume",
-            color="intersection",
-            range_x=[-1.5, 1.5],
-            range_y=[-1.5, 1.5],
-            hover_name="intersection",
-        )
+                node_x.append(x)
+                node_y.append(y)
+                node_text.append(f"{name}: {int(f.v)}")
+
+            edge_traces = []
+            for start, end in self.routes:
+                x0, y0 = self.coords[start]
+                x1, y1 = self.coords[end]
+                load = (self.fluxons[start].v + self.fluxons[end].v) / 2
+                width = max(1, load / 150)
+                edge_traces.append(
+                    go.Scatter(
+                        x=[x0, x1],
+                        y=[y0, y1],
+                        mode="lines",
+                        line=dict(width=width, color="red"),
+                        hoverinfo="skip",
+                    )
+                )
+
+            node_trace = go.Scatter(
+                x=node_x,
+                y=node_y,
+                mode="markers+text",
+                text=node_text,
+                textposition="top center",
+                marker=dict(size=12, color="blue"),
+            )
+
+            frames.append(go.Frame(data=[node_trace] + edge_traces, name=str(self.time)))
+
+        if not frames:
+            return
+
+        fig = go.Figure(data=frames[0].data, frames=frames)
         fig.update_layout(
+            xaxis=dict(range=[-1.5, 1.5], visible=False),
+            yaxis=dict(range=[-1.5, 1.5], visible=False),
             title="Bangalore Traffic Simulation",
             showlegend=False,
-            xaxis_visible=False,
-            yaxis_visible=False,
+            updatemenus=[
+                {
+                    "type": "buttons",
+                    "buttons": [
+                        {
+                            "label": "Play",
+                            "method": "animate",
+                            "args": [None, {"frame": {"duration": 500, "redraw": True}, "fromcurrent": True}],
+                        }
+                    ],
+                }
+            ],
         )
-        # Save HTML and open in browser so the animation is visible outside the terminal
+
         import os
         import plotly.io as pio
-
         output_path = os.path.abspath("traffic_simulation.html")
         pio.write_html(fig, file=output_path, auto_open=True)
 

@@ -96,31 +96,51 @@ class TrafficSimulation:
                 x, y = self.coords.get(name, (0, 0))
                 node_x.append(x)
                 node_y.append(y)
-                node_text.append(f"{name}: {int(f.v)}")
+                anchor_active = f.anchor_until > self.time
+                info = f"{name}<br>v={int(f.v)} u={f.u:.1f} W={f.W:.1f}"
+                if anchor_active:
+                    info += "<br>(anchor)"
+                node_text.append(info)
 
             edge_traces = []
             for start, end in self.routes:
                 x0, y0 = self.coords[start]
                 x1, y1 = self.coords[end]
-                load = (self.fluxons[start].v + self.fluxons[end].v) / 2
+                f_start = self.fluxons[start]
+                f_end = self.fluxons[end]
+                load = (f_start.v + f_end.v) / 2
                 width = max(1, load / 150)
+                d = self.drift(f_start, f_end)
+                if d >= 0.85:
+                    color = "blue"
+                elif d >= 0.45:
+                    color = "green"
+                elif d >= 0.05:
+                    color = "orange"
+                else:
+                    color = "red"
                 edge_traces.append(
                     go.Scatter(
                         x=[x0, x1],
                         y=[y0, y1],
                         mode="lines",
-                        line=dict(width=width, color="red"),
-                        hoverinfo="skip",
+                        line=dict(width=width, color=color),
+                        hovertext=f"drift {d:.2f}",
+                        hoverinfo="text",
                     )
                 )
 
+            node_colors = [
+                "orange" if self.fluxons[name].anchor_until > self.time else "blue"
+                for name in self.fluxons
+            ]
             node_trace = go.Scatter(
                 x=node_x,
                 y=node_y,
                 mode="markers+text",
                 text=node_text,
                 textposition="top center",
-                marker=dict(size=12, color="blue"),
+                marker=dict(size=12, color=node_colors),
             )
 
             frames.append(go.Frame(data=[node_trace] + edge_traces, name=str(self.time)))

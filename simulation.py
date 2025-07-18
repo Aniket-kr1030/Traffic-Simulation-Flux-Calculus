@@ -44,6 +44,14 @@ ROUTES = [
     ("Electronic_City", "Hebbal"),
 ]
 
+# Alternative destinations used when traffic is diverted away from a route
+DIVERSION_MAP = {
+    "Hebbal": "Silk_Board",
+    "KR_Puram": "Electronic_City",
+    "Silk_Board": "Hebbal",
+    "Electronic_City": "KR_Puram",
+}
+
 @dataclass
 class Fluxon:
     v: float                  # latest numeric value (e.g., vehicle count)
@@ -72,6 +80,7 @@ class Anchor:
     delta_u: float
     delta_tau: int
     precedence: int
+    target: Optional[str] = None
 
 class TrafficSimulation:
     def __init__(self, intersections: List[str], coords: Dict[str, Tuple[float, float]], routes: List[Tuple[str, str]] = ROUTES):
@@ -84,6 +93,7 @@ class TrafficSimulation:
         self.anchors: List[Tuple[int, str, Anchor]] = []  # queue of (time, name, anchor)
         # cooldown tracker so mitigation anchors are not reissued every tick
         self.last_decision_tick: Dict[str, int] = {name: -1000 for name in intersections}
+        self.active_diversion: Dict[str, str] = {}
 
 
     def run_visual(self, hours: int = SIMULATION_HOURS):
@@ -94,13 +104,13 @@ class TrafficSimulation:
 
         history: Dict[str, List[float]] = {name: [] for name in self.fluxons}
         states: List[Dict[str, Fluxon]] = []
-        anchor_events: List[Tuple[int, str, str]] = []
+        anchor_events: List[Tuple[int, str, Anchor]] = []
         max_v = 0.0
 
         for _ in range(ticks):
             triggered = self.step()
             if triggered:
-                anchor_events.extend([(self.time, n, a.id) for n, a in triggered])
+                anchor_events.extend([(self.time, n, a) for n, a in triggered])
 
             snapshot = {name: deepcopy(f) for name, f in self.fluxons.items()}
             states.append(snapshot)
@@ -182,7 +192,22 @@ class TrafficSimulation:
                 yaxis="y2",
             )
 
-            frames.append(go.Frame(data=[node_trace] + edge_traces + [vert_line], name=str(t_idx)))
+            anchor_marks = [
+                go.Scatter(
+                    x=[ev_time + 1],
+                    y=[history[n][ev_time]],
+                    mode="markers",
+                    marker=dict(color="purple", size=8, symbol="diamond"),
+                    name=f"⚑ {anc.id} @ {n}" + (f"→{anc.target}" if anc.target else ""),
+                    xaxis="x2",
+                    yaxis="y2",
+                    showlegend=False,
+                )
+                for ev_time, n, anc in anchor_events
+                if ev_time < t_idx
+            ]
+
+            frames.append(go.Frame(data=[node_trace] + edge_traces + anchor_marks + [vert_line], name=str(t_idx)))
 
         # build static traces for time series
         line_traces: List[go.Scatter] = []
@@ -198,24 +223,13 @@ class TrafficSimulation:
                 )
             )
 
-        for t, name, aid in anchor_events:
-            line_traces.append(
-                go.Scatter(
-                    x=[t + 1],
-                    y=[history[name][t]],
-                    mode="markers",
-                    marker=dict(color="purple", size=8, symbol="diamond"),
-                    name=f"⚑ {aid} @ {name}",
-                    xaxis="x2",
-                    yaxis="y2",
-                )
-            )
 
         legend_traces = [
             go.Scatter(x=[None], y=[None], mode="lines", line=dict(color="blue"), name="stable drift"),
             go.Scatter(x=[None], y=[None], mode="lines", line=dict(color="green"), name="plausible drift"),
             go.Scatter(x=[None], y=[None], mode="lines", line=dict(color="orange"), name="possible drift"),
             go.Scatter(x=[None], y=[None], mode="lines", line=dict(color="red"), name="void drift"),
+            go.Scatter(x=[None], y=[None], mode="markers", marker=dict(color="purple", size=8, symbol="diamond"), name="anchor"),
         ]
 
         fig = make_subplots(rows=2, cols=1, row_heights=[0.6, 0.4], vertical_spacing=0.08)
@@ -274,10 +288,20 @@ class TrafficSimulation:
 
         for start, end in self.routes:
             d = self.drift(self.fluxons[start], self.fluxons[end])
-            if d < 0.05 and self.time - self.last_decision_tick[start] > 10:
+            last = self.last_decision_tick[start]
+            if d < 0.05 and start not in self.active_diversion and self.time - last > 10:
                 # divert traffic away from unstable link
-                anc = Anchor(id="divert", delta_u=-5, delta_tau=0, precedence=2)
+                target = DIVERSION_MAP.get(start, end)
+                anc = Anchor(id="divert", delta_u=-5, delta_tau=0, precedence=2, target=target)
                 self.schedule_anchor(self.time, start, anc)
+                self.active_diversion[start] = target
+                self.last_decision_tick[start] = self.time
+            elif d >= 0.45 and start in self.active_diversion and self.time - last > 10:
+                # clear previous diversion when drift improves
+                target = self.active_diversion[start]
+                anc = Anchor(id="clear", delta_u=5, delta_tau=0, precedence=2, target=target)
+                self.schedule_anchor(self.time, start, anc)
+                del self.active_diversion[start]
                 self.last_decision_tick[start] = self.time
 
     def step(self) -> List[Tuple[str, Anchor]]:
@@ -293,6 +317,11 @@ class TrafficSimulation:
             f = self.fluxons[name]
             f.u += anchor.delta_u
             f.anchor_until = self.time + anchor.delta_tau
+            if anchor.id == "divert" and anchor.target and anchor.target in self.fluxons:
+                target_f = self.fluxons[anchor.target]
+                shift = 10
+                f.v = max(0, f.v - shift)
+                target_f.v += shift
 
         # update fluxons
         for name, f in self.fluxons.items():

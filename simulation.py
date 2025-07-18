@@ -59,6 +59,8 @@ class Fluxon:
     s: float = 0.0            # volatility
     W: float = WINDOW_MIN     # adaptive window length
     anchor_until: int = 0     # if > current tick, velocity frozen
+    active_anchor: Optional[str] = None  # id of active anchor
+    target: Optional[str] = None         # diversion target if any
 
     def update_window(self):
         self.W = WINDOW_MIN + (WINDOW_MAX - WINDOW_MIN) * math.exp(-K * math.sqrt(self.s))
@@ -135,8 +137,11 @@ class TrafficSimulation:
                 node_y.append(y)
                 anchor_active = f.anchor_until > t_idx
                 info = f"{name}<br>v={int(f.v)} u={f.u:.1f} W={f.W:.1f}"
-                if anchor_active:
-                    info += "<br>(anchor)"
+                if anchor_active and f.active_anchor:
+                    if f.target:
+                        info += f"<br>{f.active_anchor}→{f.target}"
+                    else:
+                        info += f"<br>{f.active_anchor}"
                 node_text.append(info)
 
             edge_traces = []
@@ -192,22 +197,21 @@ class TrafficSimulation:
                 yaxis="y2",
             )
 
-            anchor_marks = [
-                go.Scatter(
-                    x=[ev_time + 1],
-                    y=[history[n][ev_time]],
-                    mode="markers",
-                    marker=dict(color="purple", size=8, symbol="diamond"),
-                    name=f"⚑ {anc.id} @ {n}" + (f"→{anc.target}" if anc.target else ""),
-                    xaxis="x2",
-                    yaxis="y2",
-                    showlegend=False,
-                )
-                for ev_time, n, anc in anchor_events
-                if ev_time < t_idx
-            ]
+            past_events = [e for e in anchor_events if e[0] < t_idx]
+            anchor_trace = go.Scatter(
+                x=[ev_time + 1 for ev_time, n, _ in past_events],
+                y=[history[n][ev_time] for ev_time, n, _ in past_events],
+                text=[f"⚑ {anc.id} @ {n}" + (f"→{anc.target}" if anc.target else "") for ev_time, n, anc in past_events],
+                mode="markers",
+                marker=dict(color="purple", size=8, symbol="diamond"),
+                hoverinfo="text",
+                name="anchor",
+                xaxis="x2",
+                yaxis="y2",
+                showlegend=False,
+            )
 
-            frames.append(go.Frame(data=[node_trace] + edge_traces + anchor_marks + [vert_line], name=str(t_idx)))
+            frames.append(go.Frame(data=[node_trace] + edge_traces + [anchor_trace, vert_line], name=str(t_idx)))
 
         # build static traces for time series
         line_traces: List[go.Scatter] = []
@@ -317,6 +321,8 @@ class TrafficSimulation:
             f = self.fluxons[name]
             f.u += anchor.delta_u
             f.anchor_until = self.time + anchor.delta_tau
+            f.active_anchor = anchor.id
+            f.target = anchor.target
             if anchor.id == "divert" and anchor.target and anchor.target in self.fluxons:
                 target_f = self.fluxons[anchor.target]
                 shift = 10
@@ -337,6 +343,8 @@ class TrafficSimulation:
             f.update_window()
             if f.anchor_until <= self.time:
                 f.anchor_until = 0
+                f.active_anchor = None
+                f.target = None
             f.update_velocity(prev_v)
 
         return triggered

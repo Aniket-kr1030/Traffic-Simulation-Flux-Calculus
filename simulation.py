@@ -3,8 +3,8 @@ import random
 from dataclasses import dataclass
 from typing import Dict, Tuple, List, Optional
 
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
+import plotly.express as px
+import pandas as pd
 
 # Constants from Flux Calculus v1.1
 WINDOW_MIN = 5
@@ -24,6 +24,14 @@ COORDS = {
     "Silk_Board": (0.1, -0.9),
     "KR_Puram": (0.8, 0.3),
     "Electronic_City": (0.6, -1.2),
+}
+
+# Choke points with approximate capacities and congestion factors
+CHOKE_POINTS = {
+    "Silk_Board": {"capacity": 300, "factor": 0.5},
+    "KR_Puram": {"capacity": 350, "factor": 0.4},
+    "Hebbal": {"capacity": 400, "factor": 0.3},
+    "Electronic_City": {"capacity": 320, "factor": 0.4},
 }
 
 @dataclass
@@ -64,51 +72,44 @@ class TrafficSimulation:
         self.coords = coords
         self.anchors: List[Tuple[int, str, Anchor]] = []  # queue of (time, name, anchor)
 
-        # placeholders for visualisation objects
-        self.fig: Optional[plt.Figure] = None
-        self.ax: Optional[plt.Axes] = None
-        self.scatter = None
-
-    # ----- Visualisation helpers -----
-    def _setup_visual(self):
-        self.fig, self.ax = plt.subplots()
-        self.ax.set_xlim(-1.5, 1.5)
-        self.ax.set_ylim(-1.5, 1.5)
-        self.ax.set_aspect('equal')
-        self.ax.axis('off')
-        for name, (x, y) in self.coords.items():
-            self.ax.text(x, y + 0.1, name, ha='center')
-        self.scatter = self.ax.scatter([], [])
-
-    def _animate(self, frame):
-        self.step()
-        self.time += 1
-        x = []
-        y = []
-        sizes = []
-        for name, f in self.fluxons.items():
-            cx, cy = self.coords.get(name, (0, 0))
-            x.append(cx)
-            y.append(cy)
-            sizes.append(max(20, f.v / 5))
-        self.scatter.set_offsets(list(zip(x, y)))
-        self.scatter.set_sizes(sizes)
-        self.ax.set_title(f"Time {self.time} min")
-        return self.scatter,
 
     def run_visual(self, hours: int = SIMULATION_HOURS):
+        """Run the simulation and show an interactive Plotly animation."""
         ticks = int((60 / TICK_MINUTES) * hours)
         self.time = 0
-        self._setup_visual()
-        anim = FuncAnimation(
-            self.fig,
-            self._animate,
-            frames=ticks,
-            interval=200,
-            blit=True,
-            repeat=False,
+        frames: List[Dict[str, float]] = []
+        for _ in range(ticks):
+            self.step()
+            self.time += 1
+            for name, f in self.fluxons.items():
+                x, y = self.coords.get(name, (0, 0))
+                frames.append({
+                    "time": self.time,
+                    "x": x,
+                    "y": y,
+                    "intersection": name,
+                    "volume": f.v,
+                })
+        df = pd.DataFrame(frames)
+        fig = px.scatter(
+            df,
+            x="x",
+            y="y",
+            animation_frame="time",
+            animation_group="intersection",
+            size="volume",
+            color="intersection",
+            range_x=[-1.5, 1.5],
+            range_y=[-1.5, 1.5],
+            hover_name="intersection",
         )
-        plt.show()
+        fig.update_layout(
+            title="Bangalore Traffic Simulation",
+            showlegend=False,
+            xaxis_visible=False,
+            yaxis_visible=False,
+        )
+        fig.show()
 
     def schedule_anchor(self, when: int, name: str, anchor: Anchor):
         self.anchors.append((when, name, anchor))
@@ -128,6 +129,11 @@ class TrafficSimulation:
             prev_v = f.v
             # simple random walk for vehicle count
             f.v = max(0, f.v + random.randint(-20, 20))
+            # apply congestion effects if intersection is a choke point
+            cp = CHOKE_POINTS.get(name)
+            if cp and f.v > cp["capacity"]:
+                excess = f.v - cp["capacity"]
+                f.v -= cp["factor"] * excess
             f.update_volatility(prev_v)
             f.update_window()
             if f.anchor_until <= self.time:
@@ -171,7 +177,7 @@ if __name__ == "__main__":
         "Electronic_City",
     ]
     parser = argparse.ArgumentParser(description="Bangalore traffic simulation")
-    parser.add_argument("--visual", action="store_true", help="show matplotlib animation")
+    parser.add_argument("--visual", action="store_true", help="show Plotly animation")
     parser.add_argument("--hours", type=int, default=1, help="simulation duration in hours")
     args = parser.parse_args()
 
